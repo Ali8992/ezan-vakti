@@ -2,10 +2,12 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:geocoding/geocoding.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
-// 81 il + bazı dünya şehirleri
+// 81 il
 const List<String> turkiyeSehirler = [
   'Adana','Adıyaman','Afyonkarahisar','Ağrı','Aksaray','Amasya','Ankara','Antalya',
   'Ardahan','Artvin','Aydın','Balıkesir','Bartın','Batman','Bayburt','Bilecik',
@@ -75,6 +77,12 @@ class AnaSayfa extends StatefulWidget {
 
 class _AnaSayfaState extends State<AnaSayfa> {
   String sehir = 'İstanbul';
+  bool konumModu = false;
+  double? lat;
+  double? lon;
+  String konumEtiket = '';
+  bool konumYukleniyor = false;
+
   Map<String, String> vakitler = {};
   String hicriTarih = '';
   String miladiTarih = '';
@@ -101,6 +109,10 @@ class _AnaSayfaState extends State<AnaSayfa> {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
       sehir = prefs.getString('sehir') ?? 'İstanbul';
+      konumModu = prefs.getBool('konumModu') ?? false;
+      lat = prefs.getDouble('lat');
+      lon = prefs.getDouble('lon');
+      konumEtiket = prefs.getString('konumEtiket') ?? '';
     });
     await vakitleriGetir();
   }
@@ -108,9 +120,27 @@ class _AnaSayfaState extends State<AnaSayfa> {
   Future<void> _sehirKaydet(String yeniSehir) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('sehir', yeniSehir);
+    await prefs.setBool('konumModu', false);
+    setState(() => konumModu = false);
+  }
+
+  Future<void> _konumKaydet(double la, double lo, String etiket) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble('lat', la);
+    await prefs.setDouble('lon', lo);
+    await prefs.setString('konumEtiket', etiket);
+    await prefs.setBool('konumModu', true);
   }
 
   Future<void> vakitleriGetir() async {
+    if (konumModu && lat != null && lon != null) {
+      await _vakitleriGetirKonum();
+    } else {
+      await _vakitleriGetirSehir();
+    }
+  }
+
+  Future<void> _vakitleriGetirSehir() async {
     setState(() {
       yukleniyor = true;
       hata = '';
@@ -119,40 +149,133 @@ class _AnaSayfaState extends State<AnaSayfa> {
       final now = DateTime.now();
       final tarihStr =
           '${now.day.toString().padLeft(2, '0')}-${now.month.toString().padLeft(2, '0')}-${now.year}';
-      // method=13 -> Diyanet İşleri Başkanlığı, Türkiye
+      // method=13 -> Diyanet İşleri Başkanlığı
       final uri = Uri.parse(
           'https://api.aladhan.com/v1/timingsByCity/$tarihStr?city=$sehir&country=Turkey&method=13');
       final resp = await http.get(uri).timeout(const Duration(seconds: 15));
       if (resp.statusCode != 200) {
         throw Exception('Sunucu hatası: ${resp.statusCode}');
       }
-      final data = json.decode(resp.body);
-      final timings = Map<String, dynamic>.from(data['data']['timings']);
-      final date = data['data']['date'];
-      final hijri = date['hijri'];
-      final miladi = date['gregorian'];
-
-      final Map<String, String> temiz = {};
-      for (final k in vakitSirasi) {
-        final raw = (timings[k] ?? '').toString();
-        // "05:30 (EET)" -> "05:30"
-        temiz[k] = raw.split(' ').first;
-      }
-
-      setState(() {
-        vakitler = temiz;
-        hicriTarih =
-            '${hijri['day']} ${hijri['month']['en']} ${hijri['year']} Hicri';
-        miladiTarih =
-            '${miladi['day']} ${miladi['month']['en']} ${miladi['year']}';
-        yukleniyor = false;
-      });
-      _sonrakiVaktiHesapla();
-      _timeriBaslat();
+      _vakitleriIsle(resp.body);
     } catch (e) {
       setState(() {
         yukleniyor = false;
         hata = 'Vakitler alınamadı. İnternetinizi kontrol edin.\n$e';
+      });
+    }
+  }
+
+  Future<void> _vakitleriGetirKonum() async {
+    setState(() {
+      yukleniyor = true;
+      hata = '';
+    });
+    try {
+      final now = DateTime.now();
+      final tarihStr =
+          '${now.day.toString().padLeft(2, '0')}-${now.month.toString().padLeft(2, '0')}-${now.year}';
+      final uri = Uri.parse(
+          'https://api.aladhan.com/v1/timings/$tarihStr?latitude=$lat&longitude=$lon&method=13');
+      final resp = await http.get(uri).timeout(const Duration(seconds: 15));
+      if (resp.statusCode != 200) {
+        throw Exception('Sunucu hatası: ${resp.statusCode}');
+      }
+      _vakitleriIsle(resp.body);
+    } catch (e) {
+      setState(() {
+        yukleniyor = false;
+        hata = 'Konuma göre vakitler alınamadı.\n$e';
+      });
+    }
+  }
+
+  void _vakitleriIsle(String body) {
+    final data = json.decode(body);
+    final timings = Map<String, dynamic>.from(data['data']['timings']);
+    final date = data['data']['date'];
+    final hijri = date['hijri'];
+    final miladi = date['gregorian'];
+
+    final Map<String, String> temiz = {};
+    for (final k in vakitSirasi) {
+      final raw = (timings[k] ?? '').toString();
+      temiz[k] = raw.split(' ').first;
+    }
+
+    setState(() {
+      vakitler = temiz;
+      hicriTarih =
+          '${hijri['day']} ${hijri['month']['en']} ${hijri['year']} Hicri';
+      miladiTarih =
+          '${miladi['day']} ${miladi['month']['en']} ${miladi['year']}';
+      yukleniyor = false;
+    });
+    _sonrakiVaktiHesapla();
+    _timeriBaslat();
+  }
+
+  Future<void> konumuBulVeGetir() async {
+    setState(() {
+      konumYukleniyor = true;
+      hata = '';
+    });
+    try {
+      final servisAcik = await Geolocator.isLocationServiceEnabled();
+      if (!servisAcik) {
+        throw Exception('Konum servisi kapalı. Telefon ayarlarından konumu açın.');
+      }
+      var izin = await Geolocator.checkPermission();
+      if (izin == LocationPermission.denied) {
+        izin = await Geolocator.requestPermission();
+      }
+      if (izin == LocationPermission.denied) {
+        throw Exception('Konum izni verilmedi.');
+      }
+      if (izin == LocationPermission.deniedForever) {
+        throw Exception(
+            'Konum izni kalıcı olarak reddedilmiş. Ayarlar > Uygulamalar > Ezan Vakti > İzinler bölümünden açın.');
+      }
+
+      final pos = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.medium,
+      ).timeout(const Duration(seconds: 20));
+
+      String etiket =
+          '${pos.latitude.toStringAsFixed(2)}, ${pos.longitude.toStringAsFixed(2)}';
+      try {
+        final yerler = await placemarkFromCoordinates(
+          pos.latitude,
+          pos.longitude,
+        ).timeout(const Duration(seconds: 10));
+        if (yerler.isNotEmpty) {
+          final y = yerler.first;
+          final ilce = (y.subAdministrativeArea ?? '').trim();
+          final il = (y.administrativeArea ?? '').trim();
+          final parts = [ilce, il].where((e) => e.isNotEmpty).toList();
+          if (parts.isNotEmpty) etiket = parts.join(' / ');
+        }
+      } catch (_) {
+        // ters kodlama başarısızsa koordinat etiketi kullanılır
+      }
+
+      await _konumKaydet(pos.latitude, pos.longitude, etiket);
+      setState(() {
+        lat = pos.latitude;
+        lon = pos.longitude;
+        konumEtiket = etiket;
+        konumModu = true;
+        konumYukleniyor = false;
+      });
+      await _vakitleriGetirKonum();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Konum bulundu: $etiket')),
+        );
+      }
+    } catch (e) {
+      setState(() {
+        konumYukleniyor = false;
+        hata = e.toString().replaceFirst('Exception: ', '');
       });
     }
   }
@@ -183,7 +306,6 @@ class _AnaSayfaState extends State<AnaSayfa> {
         break;
       }
     }
-    // Hepsi geçtiyse yarınki imsak (yaklaşık)
     if (nextTime == null) {
       final t = vakitler['Fajr'] ?? '05:30';
       final parts = t.split(':');
@@ -244,6 +366,26 @@ class _AnaSayfaState extends State<AnaSayfa> {
                         style: TextStyle(
                             fontSize: 20, fontWeight: FontWeight.bold)),
                     const SizedBox(height: 12),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        onPressed: () {
+                          Navigator.pop(context);
+                          konumuBulVeGetir();
+                        },
+                        icon: const Icon(Icons.my_location),
+                        label: const Text('Konumumu Kullan (GPS)'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF0B3D2E),
+                          foregroundColor: const Color(0xFFFFC107),
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
                     TextField(
                       decoration: InputDecoration(
                         hintText: 'Şehir ara...',
@@ -264,7 +406,7 @@ class _AnaSayfaState extends State<AnaSayfa> {
                         itemCount: filtre.length,
                         itemBuilder: (_, i) {
                           final s = filtre[i];
-                          final secili = s == sehir;
+                          final secili = !konumModu && s == sehir;
                           return ListTile(
                             leading: CircleAvatar(
                               backgroundColor: secili
@@ -288,7 +430,7 @@ class _AnaSayfaState extends State<AnaSayfa> {
                               setState(() => sehir = s);
                               await _sehirKaydet(s);
                               if (mounted) Navigator.pop(context);
-                              vakitleriGetir();
+                              _vakitleriGetirSehir();
                             },
                           );
                         },
@@ -348,7 +490,7 @@ class _AnaSayfaState extends State<AnaSayfa> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    _sehirKarti(),
+                    _konumKarti(),
                     const SizedBox(height: 12),
                     if (yukleniyor)
                       const Padding(
@@ -392,7 +534,6 @@ class _AnaSayfaState extends State<AnaSayfa> {
             mainAxisAlignment: MainAxisAlignment.end,
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              // Sarı cami ikonu
               Container(
                 padding: const EdgeInsets.all(14),
                 decoration: BoxDecoration(
@@ -445,51 +586,111 @@ class _AnaSayfaState extends State<AnaSayfa> {
     );
   }
 
-  Widget _sehirKarti() {
-    return InkWell(
-      onTap: _sehirSecDialog,
-      borderRadius: BorderRadius.circular(16),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(16),
-          boxShadow: [
-            BoxShadow(
-                color: Colors.black.withValues(alpha: 0.06),
-                blurRadius: 10,
-                offset: const Offset(0, 4)),
-          ],
-        ),
-        child: Row(
-          children: [
-            const Icon(Icons.location_on, color: Color(0xFF0B3D2E)),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('Konum',
-                      style:
-                          TextStyle(fontSize: 12, color: Colors.grey)),
-                  Text(sehir,
-                      style: const TextStyle(
-                          fontSize: 18, fontWeight: FontWeight.bold)),
-                ],
+  Widget _konumKarti() {
+    final baslik = konumModu
+        ? (konumEtiket.isEmpty ? 'Konumum' : konumEtiket)
+        : sehir;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+              color: Colors.black.withValues(alpha: 0.06),
+              blurRadius: 10,
+              offset: const Offset(0, 4)),
+        ],
+      ),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.location_on, color: Color(0xFF0B3D2E)),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const Text('Konum',
+                            style: TextStyle(
+                                fontSize: 12, color: Colors.grey)),
+                        const SizedBox(width: 6),
+                        if (konumModu)
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF0B3D2E),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: const Text('GPS',
+                                style: TextStyle(
+                                    fontSize: 10,
+                                    color: Color(0xFFFFC107),
+                                    fontWeight: FontWeight.bold)),
+                          ),
+                      ],
+                    ),
+                    Text(baslik,
+                        style: const TextStyle(
+                            fontSize: 18, fontWeight: FontWeight.bold)),
+                  ],
+                ),
               ),
-            ),
-            Container(
-              padding: const EdgeInsets.symmetric(
-                  horizontal: 12, vertical: 8),
-              decoration: BoxDecoration(
-                color: const Color(0xFFFFC107),
-                borderRadius: BorderRadius.circular(20),
+              if (konumYukleniyor)
+                const SizedBox(
+                  width: 24,
+                  height: 24,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              else
+                IconButton(
+                  onPressed: konumuBulVeGetir,
+                  icon: const Icon(Icons.my_location,
+                      color: Color(0xFF0B3D2E)),
+                  tooltip: 'Konumumu bul',
+                ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: ElevatedButton.icon(
+                  onPressed: konumYukleniyor ? null : konumuBulVeGetir,
+                  icon: const Icon(Icons.gps_fixed, size: 18),
+                  label: Text(konumModu
+                      ? 'Konumu Güncelle'
+                      : 'Konumuma Göre Ayarla'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFFFFC107),
+                    foregroundColor: const Color(0xFF0B3D2E),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                ),
               ),
-              child: const Text('Değiştir',
-                  style: TextStyle(fontWeight: FontWeight.bold)),
-            ),
-          ],
-        ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: _sehirSecDialog,
+                  icon: const Icon(Icons.list, size: 18),
+                  label: const Text('Şehir Seç'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: const Color(0xFF0B3D2E),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }
@@ -582,10 +783,21 @@ class _AnaSayfaState extends State<AnaSayfa> {
           const SizedBox(height: 8),
           Text(hata, textAlign: TextAlign.center),
           const SizedBox(height: 12),
-          ElevatedButton.icon(
-            onPressed: vakitleriGetir,
-            icon: const Icon(Icons.refresh),
-            label: const Text('Tekrar Dene'),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              ElevatedButton.icon(
+                onPressed: vakitleriGetir,
+                icon: const Icon(Icons.refresh),
+                label: const Text('Tekrar Dene'),
+              ),
+              const SizedBox(width: 8),
+              OutlinedButton.icon(
+                onPressed: konumuBulVeGetir,
+                icon: const Icon(Icons.my_location),
+                label: const Text('Konum'),
+              ),
+            ],
           ),
         ],
       ),
@@ -605,7 +817,7 @@ class _AnaSayfaState extends State<AnaSayfa> {
           SizedBox(width: 10),
           Expanded(
             child: Text(
-              'Vakitler Diyanet takvimine (method 13) göre Aladhan API ile hesaplanır. İnternet gerektirir.',
+              'GPS açıkken vakitler bulunduğun konuma göre (enlem/boylam), kapalıysa seçili şehre göre hesaplanır. Diyanet metodu (13) kullanılır.',
               style: TextStyle(fontSize: 12, color: Colors.black54),
             ),
           ),
