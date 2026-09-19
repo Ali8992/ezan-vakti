@@ -4,6 +4,8 @@ on:
   push:
     branches: [ main, master ]
   workflow_dispatch:
+  release:
+    types: [ created ]
 
 jobs:
   build:
@@ -19,9 +21,8 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
-          flutter-version: '3.24.3'
 
-      - name: Bağımlılıkları yükle
+      - name: Bagimliliklari yukle
         run: flutter pub get
 
       - name: Analiz
@@ -30,8 +31,14 @@ jobs:
       - name: APK derle
         run: flutter build apk --release
 
-      - name: APK yükle
+      - name: APK yukle
         uses: actions/upload-artifact@v4
         with:
           name: ezan-vakti-apk
           path: build/app/outputs/flutter-apk/app-release.apk
+
+      - name: Release APK yukle
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/app/outputs/flutter-apk/app-release.apk
