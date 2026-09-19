@@ -1,0 +1,37 @@
+name: APK Build
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: '3.24.3'
+
+      - name: Bağımlılıkları yükle
+        run: flutter pub get
+
+      - name: Analiz
+        run: flutter analyze || true
+
+      - name: APK derle
+        run: flutter build apk --release
+
+      - name: APK yükle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ezan-vakti-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
